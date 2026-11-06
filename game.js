@@ -93,7 +93,45 @@ const state = {
   tremble: 0,
   huntDelay: 0,
   disguisedDeer: null,
+  gateOpen: false,
+  gateLamps: [],
+  registered: 0,
+  scanTarget: null,
+  scanProgress: 0,
+  scanCooldown: 0,
+  revealTimer: -1,
+  dataCardTimer: 0,
 };
+
+const TOTAL_DEER = 31; // 30 cervos verdadeiros + 1 skinwalker
+const REAL_DEER = TOTAL_DEER - 1;
+const MIN_REGISTERED = 10; // mínimo de cervos verdadeiros registrados para liberar o portão
+const SCAN_RANGE = 4.6;
+const SCAN_TIME = 1.8;
+
+const HEALTH_PROFILES = [
+  { status: "Saudável", tone: "ok", bpm: [52, 74], temp: [38.2, 39.0] },
+  { status: "Saudável", tone: "ok", bpm: [55, 78], temp: [38.3, 39.1] },
+  { status: "Saudável", tone: "ok", bpm: [50, 70], temp: [38.1, 38.9] },
+  { status: "Desidratação leve", tone: "warn", bpm: [80, 96], temp: [39.0, 39.5] },
+  { status: "Ferimento na pata", tone: "warn", bpm: [76, 92], temp: [38.8, 39.4] },
+  { status: "Febre", tone: "warn", bpm: [88, 108], temp: [40.1, 40.9] },
+  { status: "Parasitas", tone: "warn", bpm: [70, 86], temp: [38.9, 39.6] },
+];
+
+function makeDeerRecord(index) {
+  const profile = HEALTH_PROFILES[Math.floor(Math.random() * HEALTH_PROFILES.length)];
+  const range = (r) => r[0] + Math.random() * (r[1] - r[0]);
+  return {
+    id: `CRV-${String(index + 1).padStart(2, "0")}`,
+    weight: `${Math.round(70 + Math.random() * 60)} kg`,
+    age: `${1 + Math.floor(Math.random() * 9)} anos`,
+    bpm: Math.round(range(profile.bpm)),
+    temp: range(profile.temp).toFixed(1),
+    status: profile.status,
+    tone: profile.tone,
+  };
+}
 
 function seeded(seed) {
   let value = seed;
@@ -108,8 +146,9 @@ function makeMaterial(color, roughness = 0.95) {
   return new THREE.MeshStandardMaterial({ color, roughness, flatShading: true });
 }
 
-function prepareModel(model, desiredHeight, groundCenter = true) {
-  const bounds = new THREE.Box3().setFromObject(model);
+function prepareModel(model, desiredHeight, groundCenter = true, precise = false) {
+  // precise: mede os vértices reais (necessário em modelos com morph targets, cuja caixa inclui todas as poses)
+  const bounds = new THREE.Box3().setFromObject(model, precise);
   const size = bounds.getSize(new THREE.Vector3());
   const center = bounds.getCenter(new THREE.Vector3());
   if (size.y === 0) throw new Error("Um modelo 3D não possui altura visível.");
@@ -139,9 +178,9 @@ function prepareModel(model, desiredHeight, groundCenter = true) {
   });
 }
 
-function makeCharacterContainer(model, height, position, facing = 0) {
+function makeCharacterContainer(model, height, position, facing = 0, precise = false) {
   const container = new THREE.Group();
-  prepareModel(model, height);
+  prepareModel(model, height, true, precise);
   model.rotation.y = facing;
   container.add(model);
   container.position.copy(position);
@@ -153,8 +192,9 @@ function spawnDeer(model, position, animationIndex = 0) {
   const copy = cloneSkeleton(model);
   // facing -PI/2 rotaciona a cabeça do deer (+X no modelo) para apontar +Z do container
   // necessário para que Math.atan2(dx, dz) aponte o deer corretamente
-  // altura 0.95 = aprox. metade da altura do player (~1.85m)
-  const container = makeCharacterContainer(copy, 0.95, position, -Math.PI / 2);
+  // altura ~1.45m (com chifres), medida pelos vértices reais do modelo
+  const container = makeCharacterContainer(copy, 1.45, position, -Math.PI / 2, true);
+  const collar = addCollar(container);
   container.rotation.y = random() * Math.PI * 2;
   const animations = model.userData.animations || [];
   let mixer = null;
@@ -181,9 +221,115 @@ function spawnDeer(model, position, animationIndex = 0) {
     target: null,
     targetAngle: container.rotation.y,
     nextMoveAt: random() * 4 + 2,
+    collar,
+    record: null,
+    registered: false,
   };
   deer.push(deerData);
   return container;
+}
+
+// Coleira de monitoramento: anel escuro, módulo eletrônico e LED de status
+const collarBandMaterial = new THREE.MeshStandardMaterial({ color: 0x2a2620, roughness: 0.8, metalness: 0.2 });
+const collarBoxMaterial = new THREE.MeshStandardMaterial({ color: 0x3b4134, roughness: 0.55, metalness: 0.45 });
+let glowTexture = null;
+function getGlowTexture() {
+  if (glowTexture) return glowTexture;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 64;
+  const ctx = canvas.getContext("2d");
+  const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gradient.addColorStop(0, "rgba(255,255,255,1)");
+  gradient.addColorStop(0.25, "rgba(255,255,255,0.55)");
+  gradient.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, 64, 64);
+  glowTexture = new THREE.CanvasTexture(canvas);
+  return glowTexture;
+}
+
+function addCollar(container) {
+  // O modelo não tem esqueleto: mede os vértices no espaço do container (cabeça em +Z)
+  container.updateMatrixWorld(true);
+  let mesh = null;
+  container.traverse((node) => {
+    if (!mesh && node.isMesh) mesh = node;
+  });
+  const meshToContainer = container.matrixWorld.clone().invert().multiply(mesh.matrixWorld);
+  const bounds = new THREE.Box3();
+  const vertex = new THREE.Vector3();
+  const positions = mesh.geometry.attributes.position;
+  for (let i = 0; i < positions.count; i += 1) {
+    bounds.expandByPoint(vertex.fromBufferAttribute(positions, i).applyMatrix4(meshToContainer));
+  }
+  const length = bounds.max.z - bounds.min.z;
+  const height = bounds.max.y - bounds.min.y;
+  const size = length * 0.088; // raio do pescoço
+
+  // Pescoço: entre o peito e a cabeça
+  const placement = new THREE.Matrix4().compose(
+    new THREE.Vector3(0, bounds.min.y + height * 0.62, bounds.min.z + length * 0.78),
+    new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.35, 0, 0)),
+    new THREE.Vector3(1, 1, 1),
+  );
+  const collar = new THREE.Group();
+  // Preso ao próprio mesh para acompanhar a animação do nó
+  meshToContainer.invert().multiply(placement).decompose(collar.position, collar.quaternion, collar.scale);
+
+  const band = new THREE.Mesh(new THREE.TorusGeometry(size, size * 0.2, 6, 18), collarBandMaterial);
+  collar.add(band);
+
+  const box = new THREE.Mesh(new THREE.BoxGeometry(size * 0.8, size * 0.55, size * 0.7), collarBoxMaterial);
+  box.position.set(0, -size * 1.1, 0);
+  collar.add(box);
+
+  const ledMaterial = new THREE.MeshBasicMaterial({ color: 0x7dff6a });
+  const led = new THREE.Mesh(new THREE.SphereGeometry(size * 0.16, 8, 6), ledMaterial);
+  led.position.set(size * 0.42, -size * 1.1, size * 0.2);
+  collar.add(led);
+
+  const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: getGlowTexture(),
+    color: 0x7dff6a,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }));
+  glow.scale.setScalar(size * 4);
+  glow.position.copy(led.position);
+  collar.add(glow);
+
+  mesh.add(collar);
+  return { group: collar, led: ledMaterial, glow };
+}
+
+const LED_COLORS = {
+  ok: new THREE.Color(0x7dff6a),
+  warn: new THREE.Color(0xffb341),
+  registered: new THREE.Color(0x5fc8ff),
+  danger: new THREE.Color(0xff3b2f),
+};
+
+function updateCollar(animal) {
+  const { led, glow } = animal.collar;
+  const isDisguised = animal === state.disguisedDeer;
+  let color;
+  let on;
+  if (animal.registered && !isDisguised) {
+    color = LED_COLORS.registered;
+    on = 0.75;
+  } else if (isDisguised) {
+    // Falha irregular: alterna entre verde e vermelho sem ritmo
+    const n = Math.sin(state.elapsed * 13.7 + animal.phase) * Math.sin(state.elapsed * 3.1);
+    color = n > 0.55 ? LED_COLORS.danger : LED_COLORS.ok;
+    on = Math.sin(state.elapsed * 21.3) * Math.sin(state.elapsed * 2.3 + 1) > -0.2 ? 1 : 0.05;
+  } else {
+    color = LED_COLORS[animal.record?.tone || "ok"];
+    on = (state.elapsed + animal.phase) % 1.4 < 0.18 ? 1 : 0.12;
+  }
+  led.color.copy(color).multiplyScalar(0.25 + on * 0.75);
+  glow.material.color.copy(color);
+  glow.material.opacity = on;
 }
 
 function setDeerGait(animal, walking, timeScale = 1.0) {
@@ -388,8 +534,9 @@ function addExit() {
   glow.position.set(0, 6.25, 0);
   gate.add(glow);
 
-  // Exit lamps
+  // Exit lamps (vermelhas enquanto o portão está trancado)
   const lampMaterial = new THREE.MeshBasicMaterial({ color: 0xd6f09e });
+  const lights = [];
   for (const x of [-6.8, 6.8]) {
     const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.24, 12, 8), lampMaterial);
     lamp.position.set(x, 5.2, 0);
@@ -397,7 +544,25 @@ function addExit() {
     const point = new THREE.PointLight(0xd4f0a0, 2.2, 14, 2);
     point.position.copy(lamp.position);
     gate.add(point);
+    lights.push(point);
   }
+
+  // Barreira de grade metálica que fecha a passagem
+  const barMaterial = new THREE.MeshStandardMaterial({ color: 0x4a4f48, metalness: 0.6, roughness: 0.5 });
+  const barrier = new THREE.Group();
+  for (let i = 0; i < 15; i += 1) {
+    const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 3.4, 6), barMaterial);
+    bar.position.set(-7 + i, 1.7, 0);
+    bar.castShadow = true;
+    barrier.add(bar);
+  }
+  for (const y of [0.5, 2.9]) {
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(14.2, 0.12, 0.1), barMaterial);
+    rail.position.set(0, y, 0);
+    barrier.add(rail);
+  }
+  gate.add(barrier);
+  state.gateParts = { lampMaterial, glowMaterial: glow.material, lights, barrier };
 
   const sign = new THREE.Mesh(
     new THREE.BoxGeometry(4.2, 0.8, 0.18),
@@ -408,6 +573,17 @@ function addExit() {
 
   scene.add(gate);
   state.exit = gate;
+}
+
+function setGateOpen(open) {
+  state.gateOpen = open;
+  const parts = state.gateParts;
+  if (!parts) return;
+  const color = open ? 0xd6f09e : 0xff4a3a;
+  parts.lampMaterial.color.setHex(color);
+  parts.glowMaterial.color.setHex(open ? 0xccffaa : 0xff5a44);
+  for (const light of parts.lights) light.color.setHex(open ? 0xd4f0a0 : 0xff5a44);
+  parts.barrier.visible = !open;
 }
 
 // Build realistic forest environment using plantsnshii models
@@ -620,28 +796,24 @@ function createWorld(deerModel, monsterGLTF) {
   addFirstPersonView();
 
   const positions = [];
-  const totalDeer = 38;
-  for (let index = 0; index < totalDeer; index += 1) {
+  for (let index = 0; index < TOTAL_DEER; index += 1) {
     positions.push(randomForestPoint({
       playerDistance: 14,
-      exitDistance: 20,
+      exitDistance: 30,
       existing: positions,
-      existingDistance: 8,
+      existingDistance: 12,
     }));
   }
 
-  const disguisedIndex = Math.floor(Math.random() * positions.length);
-  const disguised = spawnDeer(deerModel, positions[disguisedIndex], disguisedIndex);
-  state.disguisedDeer = deer.find((animal) => animal.container === disguised);
-
   for (let index = 0; index < positions.length; index += 1) {
-    if (index !== disguisedIndex) spawnDeer(deerModel, positions[index], index);
+    spawnDeer(deerModel, positions[index], index);
   }
+  state.disguisedDeer = deer[0];
 
   const monsterModel = monsterGLTF.scene;
-  state.hunterPosition.copy(positions[disguisedIndex]);
+  state.hunterPosition.copy(positions[0]);
   // facing 0 aligns natively
-  state.hunter = makeCharacterContainer(monsterModel, 3.2, positions[disguisedIndex], 0);
+  state.hunter = makeCharacterContainer(monsterModel, 3.2, positions[0], 0);
   state.hunter.visible = false;
 
   // Cache monster skeleton bones for dynamic chase animations
@@ -733,6 +905,24 @@ function startGame() {
   }));
   state.cameraPitch = 0;
   state.hunter.visible = false;
+  state.registered = 0;
+  state.scanTarget = null;
+  state.scanProgress = 0;
+  state.scanCooldown = 0;
+  state.revealTimer = -1;
+  state.dataCardTimer = 0;
+  state.threatDistance = Infinity;
+  setGateOpen(false);
+
+  // Cada partida sorteia qual cervo é o skinwalker e novos dados de saúde
+  state.disguisedDeer = deer[Math.floor(Math.random() * deer.length)];
+  deer.forEach((animal, index) => {
+    animal.record = makeDeerRecord(index);
+    animal.registered = false;
+  });
+  buildRoster();
+  $("#data-card").classList.add("hidden");
+  $("#scan-prompt").classList.add("hidden");
 
   deer.forEach((animal) => {
     const { container, origin, idleAction, walkAction } = animal;
@@ -774,9 +964,10 @@ function startGame() {
   $("#threat-card").classList.remove("alert");
   $("#threat-text").textContent = "A floresta está quieta demais.";
   $("#warning-banner").classList.remove("visible");
-  $("#objective-text").textContent = "Encontre a saída da reserva florestal";
+  $("#threat-text").textContent = "Siga o sinal das coleiras. Os cervos estão acostumados com você.";
+  updateObjective();
   $("#exit-marker").classList.add("hidden");
-  $("#stamina-caption").textContent = "Guarde energia. Você vai precisar.";
+  $("#stamina-caption").textContent = "Guarde fôlego. Você pode precisar.";
 
   if (state.sound) {
     const now = state.sound.context.currentTime;
@@ -793,16 +984,238 @@ function endGame(won) {
   endScreen.classList.remove("hidden", "lost");
   hud.classList.add("hidden");
   $("#crosshair").classList.add("hidden");
+  const realDeer = deer.filter((animal) => animal !== state.disguisedDeer);
+  const realRegistered = realDeer.filter((animal) => animal.registered).length;
+  const anomalyId = state.disguisedDeer.record.id;
+  const anomalyFound = state.disguisedDeer.registered;
   if (won) {
-    $("#end-eyebrow").textContent = "VOCÊ ESCAPOU DA RESERVA AMBIENTAL";
-    $("#end-title").innerHTML = "VOCÊ<br /><span>CONSEGUIU.</span>";
-    $("#end-message").textContent = "O portão ficou para trás. A floresta volta a guardar seus segredos.";
+    const anomalyNote = anomalyFound
+      ? `A coleira ${anomalyId} foi marcada como anomalia — ninguém deve voltar lá à noite.`
+      : "Uma das coleiras ainda transmite um sinal estranho.";
+    if (realRegistered === realDeer.length) {
+      $("#end-eyebrow").textContent = "RELATÓRIO COMPLETO";
+      $("#end-title").innerHTML = "RONDA<br /><span>PERFEITA.</span>";
+      $("#end-message").textContent = `Todos os ${realDeer.length} cervos foram registrados. ${anomalyNote}`;
+    } else if (realRegistered >= MIN_REGISTERED) {
+      $("#end-eyebrow").textContent = "RELATÓRIO DE CAMPO ENVIADO";
+      $("#end-title").innerHTML = "MISSÃO<br /><span>CUMPRIDA.</span>";
+      $("#end-message").textContent = `${realRegistered}/${realDeer.length} cervos registrados. ${anomalyNote}`;
+    } else {
+      $("#end-eyebrow").textContent = "VOCÊ ESCAPOU DA RESERVA AMBIENTAL";
+      $("#end-title").innerHTML = "VOCÊ<br /><span>SOBREVIVEU.</span>";
+      $("#end-message").textContent = `Mas o relatório não atingiu o mínimo: ${realRegistered}/${MIN_REGISTERED} cervos registrados. ${anomalyFound ? `A anomalia ${anomalyId} foi identificada.` : "A coleira falsa continua lá dentro."}`;
+    }
   } else {
     endScreen.classList.add("lost");
     $("#end-eyebrow").textContent = "A RESERVA COBROU O SEU PREÇO";
     $("#end-title").textContent = "voce nao conseguiu escapar";
-    $("#end-message").textContent = "A floresta ficou em silêncio outra vez.";
+    $("#end-message").textContent = `Registros recuperados: ${realRegistered}/${realDeer.length}. A coleira ${anomalyId} ainda transmite. Ela não pertence a um cervo.`;
   }
+}
+
+function buildRoster() {
+  const roster = $("#roster");
+  roster.innerHTML = "";
+  for (const animal of deer) {
+    const chip = document.createElement("span");
+    chip.className = "roster-chip";
+    chip.textContent = animal.record.id.slice(4);
+    animal.chip = chip;
+    roster.append(chip);
+  }
+}
+
+function updateObjective() {
+  $("#register-count").textContent = `${state.registered}/${REAL_DEER} · MÍN. ${MIN_REGISTERED}`;
+  if (state.hunterAwake) {
+    $("#objective-text").textContent = "PORTÃO DE EMERGÊNCIA ABERTO — CORRA!";
+  } else if (state.registered >= REAL_DEER) {
+    $("#objective-text").textContent = "Todos registrados. Saia pelo portão norte.";
+  } else if (state.gateOpen) {
+    $("#objective-text").textContent = `Portão liberado (${state.registered}/${REAL_DEER}). Saia ou continue registrando.`;
+  } else {
+    $("#objective-text").textContent = `Registre ao menos ${MIN_REGISTERED} cervos (${state.registered}/${MIN_REGISTERED})`;
+  }
+}
+
+function showDataCard(animal, anomaly) {
+  const r = animal.record;
+  const card = $("#data-card");
+  card.classList.remove("hidden", "ok", "warn", "danger");
+  card.classList.add(anomaly ? "danger" : r.tone);
+  $("#data-id").textContent = r.id;
+  if (anomaly) {
+    $("#data-sex").textContent = "???";
+    $("#data-age").textContent = "ERRO";
+    $("#data-bpm").textContent = "0 bpm";
+    $("#data-temp").textContent = "11.4 °C";
+    $("#data-status").textContent = "SINAL VITAL INCOMPATÍVEL";
+  } else {
+    $("#data-sex").textContent = r.weight;
+    $("#data-age").textContent = r.age;
+    $("#data-bpm").textContent = `${r.bpm} bpm`;
+    $("#data-temp").textContent = `${r.temp} °C`;
+    $("#data-status").textContent = r.status;
+  }
+  state.dataCardTimer = anomaly ? 6 : 4.5;
+}
+
+function registerDeer(animal) {
+  animal.registered = true;
+  animal.chip?.classList.add("done");
+  const anomaly = animal === state.disguisedDeer;
+  if (!anomaly) state.registered += 1; // conta só cervos verdadeiros
+  showDataCard(animal, anomaly);
+  playBeep(anomaly);
+  if (anomaly) {
+    animal.chip?.classList.add("anomaly");
+    $("#threat-card").classList.add("alert");
+    $("#threat-text").textContent = "Isso não é um cervo...";
+    state.revealTimer = 1.3;
+  } else {
+    $("#threat-text").textContent = `${animal.record.id} registrado. ${animal.record.tone === "ok" ? "Sinais vitais normais." : "Requer acompanhamento."}`;
+    if (state.registered >= MIN_REGISTERED && !state.gateOpen) {
+      setGateOpen(true);
+      $("#threat-text").textContent = `${MIN_REGISTERED} cervos registrados. O portão norte foi liberado.`;
+    }
+  }
+  updateObjective();
+}
+
+function playBeep(anomaly) {
+  if (!state.sound) return;
+  const { context, master } = state.sound;
+  const now = context.currentTime;
+  const osc = context.createOscillator();
+  const gain = context.createGain();
+  osc.type = anomaly ? "square" : "sine";
+  if (anomaly) {
+    osc.frequency.setValueAtTime(420, now);
+    osc.frequency.linearRampToValueAtTime(90, now + 0.9);
+  } else {
+    osc.frequency.setValueAtTime(880, now);
+    osc.frequency.setValueAtTime(1320, now + 0.09);
+  }
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(anomaly ? 0.3 : 0.18, now + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + (anomaly ? 1 : 0.22));
+  osc.connect(gain);
+  gain.connect(master);
+  osc.start(now);
+  osc.stop(now + 1.05);
+}
+
+function cameraForward(target) {
+  return target.set(-Math.sin(state.cameraYaw), 0, -Math.cos(state.cameraYaw));
+}
+
+function updateScanner(delta) {
+  state.scanCooldown = Math.max(0, state.scanCooldown - delta);
+  if (state.dataCardTimer > 0) {
+    state.dataCardTimer -= delta;
+    if (state.dataCardTimer <= 0) $("#data-card").classList.add("hidden");
+  }
+  if (state.revealTimer > 0) {
+    state.revealTimer -= delta;
+    if (state.revealTimer <= 0) awakenHunter();
+  }
+
+  // Alvo de escaneamento: cervo não registrado, perto e na mira
+  const forward = cameraForward(new THREE.Vector3());
+  let best = null;
+  let bestScore = Infinity;
+  if (!state.hunterAwake && state.revealTimer < 0) {
+    for (const animal of deer) {
+      if (animal.registered || !animal.container.visible) continue;
+      tempVector.subVectors(animal.container.position, playerPosition).setY(0);
+      const distance = tempVector.length();
+      if (distance > SCAN_RANGE) continue;
+      const alignment = tempVector.normalize().dot(forward);
+      if (alignment < 0.82) continue;
+      const score = distance * (2 - alignment);
+      if (score < bestScore) {
+        bestScore = score;
+        best = animal;
+      }
+    }
+  }
+
+  if (best !== state.scanTarget) {
+    state.scanTarget = best;
+    state.scanProgress = 0;
+  }
+
+  const prompt = $("#scan-prompt");
+  if (!best) {
+    prompt.classList.add("hidden");
+    return;
+  }
+  prompt.classList.remove("hidden");
+  const sprinting = keys.has("ShiftLeft") || keys.has("ShiftRight");
+  const agitated = best.state === "fleeing";
+  $("#scan-target").textContent = best.record.id;
+  if (agitated) {
+    $("#scan-hint").textContent = "Cervo agitado — espere ele se acalmar";
+    state.scanProgress = 0;
+  } else if (keys.has("KeyE") && !sprinting && state.scanCooldown <= 0) {
+    state.scanProgress += delta / SCAN_TIME;
+    $("#scan-hint").textContent = "Lendo coleira...";
+    if (state.scanProgress >= 1) {
+      registerDeer(best);
+      state.scanTarget = null;
+      state.scanProgress = 0;
+      state.scanCooldown = 0.6;
+      prompt.classList.add("hidden");
+    }
+  } else {
+    state.scanProgress = Math.max(0, state.scanProgress - delta * 0.8);
+    $("#scan-hint").textContent = "Segure E para escanear a coleira";
+  }
+  $("#scan-fill").style.width = `${Math.round(Math.min(1, state.scanProgress) * 100)}%`;
+}
+
+function updateTracker() {
+  let target = null;
+  let label = "";
+  let unstable = false;
+  const toGate = state.hunterAwake || state.registered >= REAL_DEER;
+  if (toGate) {
+    target = exitPosition;
+    label = "PORTÃO NORTE";
+  } else {
+    let nearest = Infinity;
+    for (const animal of deer) {
+      if (animal.registered) continue;
+      const d = animal.container.position.distanceTo(playerPosition);
+      if (d < nearest) {
+        nearest = d;
+        target = animal.container.position;
+        label = animal.record.id;
+        unstable = animal === state.disguisedDeer;
+      }
+    }
+  }
+  const tracker = $("#tracker");
+  if (!target) {
+    tracker.classList.add("hidden");
+    return;
+  }
+  tracker.classList.remove("hidden");
+  tempVector.subVectors(target, playerPosition).setY(0);
+  const distance = tempVector.length();
+  const forward = cameraForward(new THREE.Vector3());
+  const right = new THREE.Vector3(Math.cos(state.cameraYaw), 0, -Math.sin(state.cameraYaw));
+  const angle = Math.atan2(tempVector.dot(right), tempVector.dot(forward));
+  const glitch = unstable && Math.sin(state.elapsed * 9.3) * Math.sin(state.elapsed * 2.1) > 0.45;
+  $("#tracker-arrow").style.transform = `rotate(${angle + (glitch ? (Math.random() - 0.5) * 1.6 : 0)}rad)`;
+  $("#tracker-label").textContent = label;
+  $("#tracker-distance").textContent = glitch ? `${Math.floor(Math.random() * 99)}?m` : `${Math.round(distance)} m`;
+  $("#tracker-signal").textContent = toGate ? "SAÍDA" : unstable ? "SINAL INSTÁVEL" : "SINAL ESTÁVEL";
+  tracker.classList.toggle("unstable", unstable && !toGate);
+  // Com o portão liberado, mostra também a distância até a saída
+  const gateLine = $("#tracker-gate");
+  gateLine.classList.toggle("hidden", !state.gateOpen || toGate);
+  if (state.gateOpen && !toGate) gateLine.textContent = `PORTÃO LIBERADO · ${Math.round(playerPosition.distanceTo(exitPosition))} m`;
 }
 
 function setPaused(paused) {
@@ -842,9 +1255,18 @@ function awakenHunter() {
     state.hunterAction.reset().play();
   }
 
+  state.revealTimer = -1;
+  setGateOpen(true);
+  updateObjective();
+  $("#scan-prompt").classList.add("hidden");
+
+  // Pânico: todos os cervos verdadeiros fogem do skinwalker
+  for (const animal of deer) {
+    if (animal !== state.disguisedDeer && animal.container.visible) startFlee(animal, state.hunterPosition);
+  }
+
   $("#threat-card").classList.add("alert");
   $("#threat-text").textContent = "ELE PERCEBEU VOCÊ!";
-  $("#objective-text").textContent = "CORRA até o portão de saída!";
   $("#warning-banner").classList.add("visible");
   $("#exit-marker").classList.remove("hidden");
   $("#stamina-caption").textContent = "Segure SHIFT para correr!";
@@ -903,9 +1325,9 @@ function updatePlayer(delta) {
   if (nextX < worldLimit.minX + 1.2 || nextX > worldLimit.maxX - 1.2) blockX = true;
   if (nextZ > worldLimit.maxZ - 1.2) blockZ = true;
 
-  // North fence: allows passing only through the 16m gate gap (|x| < 7.5)
+  // North fence: allows passing only through the 16m gate gap (|x| < 7.5), and only when unlocked
   if (nextZ < worldLimit.minZ + 1.2) {
-    if (Math.abs(playerPosition.x) > 7.5 || Math.abs(nextX) > 7.5) {
+    if (!state.gateOpen || Math.abs(playerPosition.x) > 7.5 || Math.abs(nextX) > 7.5) {
       blockZ = true;
     }
   }
@@ -921,7 +1343,8 @@ function updatePlayer(delta) {
 
 function updateHunter(delta) {
   if (!state.hunterAwake) {
-    if (playerPosition.distanceTo(state.disguisedDeer.container.position) < 7.2) awakenHunter();
+    // Encostar no skinwalker sem escanear também o desperta
+    if (state.revealTimer < 0 && playerPosition.distanceTo(state.disguisedDeer.container.position) < 2.2) awakenHunter();
     return;
   }
 
@@ -1090,37 +1513,53 @@ function updateCamera(delta) {
   );
 }
 
+function startFlee(animal, fromPosition) {
+  animal.state = "fleeing";
+  const awayDir = new THREE.Vector3()
+    .subVectors(animal.container.position, fromPosition)
+    .setY(0)
+    .normalize();
+  const spread = (animal.phase - Math.PI) * 0.45;
+  awayDir.applyAxisAngle(new THREE.Vector3(0, 1, 0), spread);
+
+  const fleeDist = 26 + Math.random() * 12;
+  let tx = animal.container.position.x + awayDir.x * fleeDist;
+  let tz = animal.container.position.z + awayDir.z * fleeDist;
+  tx = THREE.MathUtils.clamp(tx, worldLimit.minX + 6, worldLimit.maxX - 6);
+  tz = THREE.MathUtils.clamp(tz, worldLimit.minZ + 6, worldLimit.maxZ - 6);
+
+  animal.target = new THREE.Vector3(tx, 0, tz);
+  setDeerGait(animal, true, 1.9); // sprint animation
+}
+
+function turnToward(animal, desiredAngle, rate, delta) {
+  let angleDiff = (desiredAngle - animal.container.rotation.y) % (Math.PI * 2);
+  if (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+  if (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+  animal.container.rotation.y += Math.sign(angleDiff) * Math.min(Math.abs(angleDiff), rate * delta);
+}
+
 function updateDeer(delta) {
-  // Distância de alerta reduzida: deer só fogem quando o player chega bem perto
-  // 10m correndo (sprint), 7m andando normal
-  const alertDistance = (keys.has("ShiftLeft") || keys.has("ShiftRight")) && state.playerMoving ? 10 : 7;
+  // Cervos da reserva estão acostumados ao guarda: nunca fogem dele (só do skinwalker revelado)
+  const playing = state.phase === "playing";
 
   for (const animal of deer) {
     if (!animal.container.visible) continue;
+    updateCollar(animal);
 
     const distToPlayer = animal.container.position.distanceTo(playerPosition);
     const isDisguised = animal === state.disguisedDeer;
 
-    // Fleeing trigger: normal deer flee from player when too close
-    if (!isDisguised && animal.state !== "fleeing") {
-      if (distToPlayer < alertDistance) {
-        animal.state = "fleeing";
-        const awayDir = new THREE.Vector3()
-          .subVectors(animal.container.position, playerPosition)
-          .setY(0)
-          .normalize();
-        const spread = (animal.phase - Math.PI) * 0.45;
-        awayDir.applyAxisAngle(new THREE.Vector3(0, 1, 0), spread);
-
-        const fleeDist = 32 + Math.random() * 14;
-        let tx = animal.container.position.x + awayDir.x * fleeDist;
-        let tz = animal.container.position.z + awayDir.z * fleeDist;
-        tx = THREE.MathUtils.clamp(tx, worldLimit.minX + 6, worldLimit.maxX - 6);
-        tz = THREE.MathUtils.clamp(tz, worldLimit.minZ + 6, worldLimit.maxZ - 6);
-
-        animal.target = new THREE.Vector3(tx, 0, tz);
-        setDeerGait(animal, true, 1.9); // sprint animation
+    // O skinwalker para e encara o guarda quando ele se aproxima
+    if (isDisguised && playing && distToPlayer < 16) {
+      if (animal.state === "walking") {
+        animal.state = "idle";
+        setDeerGait(animal, false);
+        animal.target = null;
       }
+      animal.nextMoveAt = state.elapsed + 3;
+      turnToward(animal, Math.atan2(playerPosition.x - animal.container.position.x, playerPosition.z - animal.container.position.z), 1.4, delta);
+      continue;
     }
 
     if (animal.state === "fleeing") {
@@ -1238,7 +1677,13 @@ function frame() {
     updateHunter(delta);
     updateDeer(delta);
     updateCamera(delta);
-    if (playerPosition.distanceTo(exitPosition) < 6.5) endGame(true);
+    updateScanner(delta);
+    updateTracker();
+    const exitDistance = playerPosition.distanceTo(exitPosition);
+    if (exitDistance < 6.5 && state.gateOpen) endGame(true);
+    else if (exitDistance < 12 && !state.gateOpen && !state.hunterAwake) {
+      $("#threat-text").textContent = `Portão trancado. Faltam ${MIN_REGISTERED - state.registered} registros para liberar a saída.`;
+    }
     if (Math.floor(state.elapsed * 5) !== Math.floor((state.elapsed - delta) * 5)) updateHUD();
   } else {
     updateDeer(delta);
@@ -1311,11 +1756,20 @@ function attachControls() {
   });
   sprintButton.addEventListener("pointerup", () => keys.delete("ShiftLeft"));
   sprintButton.addEventListener("pointercancel", () => keys.delete("ShiftLeft"));
+  const scanButton = $("#scan-button");
+  scanButton.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    keys.add("KeyE");
+    scanButton.setPointerCapture(event.pointerId);
+  });
+  scanButton.addEventListener("pointerup", () => keys.delete("KeyE"));
+  scanButton.addEventListener("pointercancel", () => keys.delete("KeyE"));
 }
 
 async function initialize() {
   attachControls();
   addExit();
+  setGateOpen(false);
   showLoadProgress("Carregando os cervos da reserva...", 0);
 
   try {

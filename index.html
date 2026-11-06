@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="Oh Deer: sobreviva à noite, desconfie dos cervos e encontre o portão."
+      content="Oh Deer: registre as coleiras dos cervos da reserva, desconfie de um deles e saia pelo portão."
     />
     <meta name="theme-color" content="#101812" />
     <title>Oh Deer — Sobreviva à floresta</title>
@@ -46,16 +46,18 @@
           <div class="title-kicker"><span></span> UMA HISTÓRIA DE SOBREVIVÊNCIA</div>
           <h1>OH<br /><span>DEER</span></h1>
           <p class="title-description">
-            Você se perdeu na floresta. A lanterna mal corta a escuridão — e
-            nem todo cervo é o que parece.
+            Você é o guarda noturno da reserva. Cada cervo usa uma coleira que
+            monitora sua saúde: registre ao menos 10 deles e saia pelo
+            portão. Mas uma dessas coleiras não está num cervo.
           </p>
           <button id="start-button" class="primary-button">
-            <span>Encontrar uma saída</span><span class="button-arrow">↗</span>
+            <span>Iniciar a ronda</span><span class="button-arrow">↗</span>
           </button>
           <div class="controls-hint">
             <span class="key">W</span><span class="key">A</span><span class="key">S</span><span class="key">D</span>
             <span>mover</span><span class="hint-divider">·</span>
             <span>arraste para olhar</span><span class="hint-divider">·</span>
+            <span class="key">E</span><span>escanear coleira</span><span class="hint-divider">·</span>
             <span class="key key-wide">SHIFT</span><span>correr</span>
           </div>
         </div>
@@ -66,7 +68,39 @@
         <div class="hud-brand"><span class="brand-mark">✳</span> OH DEER <span class="brand-separator">/</span> NOITE</div>
         <div class="objective-card">
           <div class="objective-icon">⌖</div>
-          <div><p class="hud-label">OBJETIVO</p><p id="objective-text">Encontre a saída da floresta</p></div>
+          <div><p class="hud-label">OBJETIVO</p><p id="objective-text">Registre as coleiras dos cervos</p></div>
+        </div>
+        <div class="roster-card">
+          <div class="roster-heading"><span>REGISTRO DE CAMPO</span><span id="register-count">0/30 · MÍN. 10</span></div>
+          <div id="roster" class="roster"></div>
+        </div>
+        <div id="tracker" class="tracker">
+          <p class="hud-label">RECEPTOR DE COLEIRA</p>
+          <div class="tracker-body">
+            <div class="tracker-dial"><span id="tracker-arrow" class="tracker-arrow">▲</span></div>
+            <div>
+              <p id="tracker-label" class="tracker-label">CRV-01</p>
+              <p id="tracker-distance" class="tracker-distance">— m</p>
+              <p id="tracker-signal" class="tracker-signal">SINAL ESTÁVEL</p>
+              <p id="tracker-gate" class="tracker-gate hidden">PORTÃO LIBERADO</p>
+            </div>
+          </div>
+        </div>
+        <div id="scan-prompt" class="scan-prompt hidden">
+          <p><span class="key">E</span> <span id="scan-target">CRV-01</span></p>
+          <div class="scan-track"><span id="scan-fill"></span></div>
+          <p id="scan-hint" class="scan-hint">Segure E para escanear a coleira</p>
+        </div>
+        <div id="data-card" class="data-card hidden">
+          <p class="hud-label">LEITURA DA COLEIRA</p>
+          <p id="data-id" class="data-id">CRV-01</p>
+          <dl>
+            <dt>Peso</dt><dd id="data-sex">—</dd>
+            <dt>Idade</dt><dd id="data-age">—</dd>
+            <dt>Batimentos</dt><dd id="data-bpm">—</dd>
+            <dt>Temperatura</dt><dd id="data-temp">—</dd>
+          </dl>
+          <p id="data-status" class="data-status">—</p>
         </div>
         <div id="threat-card" class="threat-card">
           <span class="threat-dot"></span>
@@ -92,6 +126,7 @@
             <button data-key="KeyD" aria-label="Mover à direita">→</button>
           </div>
           <button id="sprint-button" class="sprint-button">CORRER</button>
+          <button id="scan-button" class="scan-button">SCAN</button>
         </div>
       </section>
 

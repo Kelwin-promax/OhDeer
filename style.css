@@ -301,6 +301,72 @@ h1 { font-size: clamp(80px, 12vw, 154px); }
 
 .mobile-controls { display: none; }
 
+/* Registro de campo, receptor e leitura das coleiras */
+.roster-card, .tracker, .data-card {
+  border: 1px solid rgb(215 221 202 / 14%);
+  background: rgb(12 18 14 / 58%);
+  backdrop-filter: blur(8px);
+}
+.roster-card { width: min(370px, calc(100vw - 56px)); margin-top: 10px; padding: 11px 16px 13px; }
+.roster-heading { display: flex; justify-content: space-between; color: #aab49b; font-size: 8px; letter-spacing: .14em; margin-bottom: 9px; }
+#register-count { color: var(--paper); font-size: 11px; font-variant-numeric: tabular-nums; }
+.roster { display: flex; gap: 5px; flex-wrap: wrap; }
+.roster-chip {
+  display: grid; place-items: center; width: 26px; height: 18px;
+  border: 1px solid rgb(215 221 202 / 22%); color: #8e9585; font-size: 10px; font-weight: 600;
+}
+.roster-chip.done { color: #0d140f; background: #8fd0f0; border-color: #8fd0f0; }
+.roster-chip.anomaly { background: #ff5a44; border-color: #ff5a44; animation: pulse .6s infinite; }
+
+.tracker { position: absolute; top: 32px; right: 38px; padding: 12px 16px 14px; min-width: 200px; }
+.tracker-body { display: flex; align-items: center; gap: 14px; }
+.tracker-dial {
+  display: grid; place-items: center; width: 52px; height: 52px; border-radius: 50%;
+  border: 1px solid rgb(183 201 157 / 45%); background: radial-gradient(circle, rgb(183 201 157 / 14%), transparent 70%);
+}
+.tracker-arrow { color: var(--green); font-size: 20px; line-height: 1; transition: transform .08s linear; }
+.tracker-label { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: .08em; }
+.tracker-distance { margin: 2px 0; font-size: 20px; font-family: "Oswald", sans-serif; font-variant-numeric: tabular-nums; }
+.tracker-signal { margin: 0; color: #aab49b; font-size: 8px; letter-spacing: .14em; }
+.tracker-gate { margin: 5px 0 0; color: #b9e59a; font-size: 8px; letter-spacing: .14em; }
+.tracker.unstable .tracker-signal { color: #ffb08a; animation: pulse .35s infinite; }
+.tracker.unstable .tracker-arrow { color: #ffc29b; }
+
+.scan-prompt {
+  position: absolute; left: 50%; top: 70%; transform: translateX(-50%);
+  width: 260px; padding: 10px 14px; text-align: center;
+  background: rgb(12 18 14 / 70%); border: 1px solid rgb(183 201 157 / 40%);
+}
+.scan-prompt p { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .08em; }
+.scan-prompt .key { margin-right: 6px; }
+.scan-track { height: 3px; margin: 9px 0 7px; background: rgb(220 227 209 / 22%); }
+.scan-track span { display: block; height: 100%; width: 0; background: #8fd0f0; }
+.scan-prompt .scan-hint { color: #aab49b; font-size: 9px; font-weight: 500; }
+
+.data-card { position: absolute; right: 38px; top: 150px; width: 230px; padding: 14px 16px; }
+.data-id { margin: 0 0 10px; font-family: "Oswald", sans-serif; font-size: 22px; letter-spacing: .06em; }
+.data-card dl { display: grid; grid-template-columns: auto 1fr; gap: 5px 12px; margin: 0 0 11px; font-size: 11px; }
+.data-card dt { color: #8e9585; }
+.data-card dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.data-status { margin: 0; padding-top: 9px; border-top: 1px solid rgb(215 221 202 / 14%); font-size: 12px; font-weight: 600; }
+.data-card.ok .data-status { color: #9fe39a; }
+.data-card.warn .data-status { color: #ffc070; }
+.data-card.danger { border-color: #ff5a44; background: rgb(40 8 6 / 72%); animation: glitch .18s steps(2) infinite; }
+.data-card.danger .data-status, .data-card.danger .data-id { color: #ff7a62; }
+.scan-button { display: none; }
+@media (max-width: 700px) {
+  .scan-button {
+    display: block; position: absolute; right: 95px; bottom: 14px; width: 62px; height: 62px;
+    color: #0d140f; font-size: 10px; font-weight: 700; letter-spacing: .12em;
+    border: 0; border-radius: 50%; background: #8fd0f0; touch-action: none;
+  }
+  .tracker { top: 20px; right: 19px; min-width: 0; padding: 8px 10px; }
+  .tracker-dial { width: 40px; height: 40px; }
+  .roster-chip { width: 22px; }
+  .data-card { right: 19px; top: auto; bottom: 200px; width: 200px; }
+}
+
+@keyframes glitch { 50% { transform: translateX(2px); } }
 @keyframes pulse { 50% { opacity: .45; } }
 @keyframes turn { to { transform: rotate(360deg); } }
 
